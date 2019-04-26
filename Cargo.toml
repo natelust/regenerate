@@ -1,0 +1,10 @@
+[package]
+name = "regenerate"
+version = "0.1.0"
+authors = ["Nate Lust <nlust@astro.princeton.edu>"]
+edition = "2018"
+
+[dependencies]
+git2 = "^0.8"
+reqwest = "^0.9"
+yaml-rust = "^0.4"
