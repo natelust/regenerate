@@ -1,11 +1,12 @@
 use git2::Repository;
-use std::path::PathBuf;
-use std::collections::HashMap;
 use reqwest;
+use reups_lib as reups;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use yaml_rust;
 
 struct RepoSourceWrapper {
-    remote_map: yaml_rust::yaml::Yaml
+    remote_map: yaml_rust::yaml::Yaml,
 }
 
 impl RepoSourceWrapper {
@@ -14,27 +15,31 @@ impl RepoSourceWrapper {
     }
 
     fn get_url(&self, product: &str) -> Option<&str> {
-         match &self.remote_map[product] {
+        match &self.remote_map[product] {
             yaml_rust::yaml::Yaml::String(s) => Some(&s),
-            yaml_rust::yaml::Yaml::Hash(hm) => {
-                Some(hm[&yaml_rust::yaml::Yaml::String("url".to_string())].as_str().unwrap())
-            },
+            yaml_rust::yaml::Yaml::Hash(hm) => Some(
+                hm[&yaml_rust::yaml::Yaml::String("url".to_string())]
+                    .as_str()
+                    .unwrap(),
+            ),
             yaml_rust::yaml::Yaml::BadValue => None,
-            _ => panic!("There should be no other types in remote product mapping")
+            _ => panic!("There should be no other types in remote product mapping"),
         }
-
     }
 }
 
-struct Regenerate{
+struct Regenerate {
     product_urls: RepoSourceWrapper,
-    checkout_root: String
+    checkout_root: String,
 }
 
 impl Regenerate {
     fn new() -> Result<Regenerate, String> {
         let mut hash = HashMap::new();
-        hash.insert("pipe_tasks".to_string(), "https://github.com/lsst/pipe_tasks.git".to_string());
+        hash.insert(
+            "pipe_tasks".to_string(),
+            "https://github.com/lsst/pipe_tasks.git".to_string(),
+        );
         // get the mapping from defined url
         let remote_map_url = "https://raw.githubusercontent.com/lsst/repos/master/etc/repos.yaml";
         let mut response = reqwest::get(remote_map_url).unwrap();
@@ -44,18 +49,18 @@ impl Regenerate {
             // This is not using multi paged yaml, so just take the first
             parsed.remove(0)
         } else {
-            return Err("There was a problem fetch or parsing the remote map".to_string())
+            return Err("There was a problem fetch or parsing the remote map".to_string());
         };
         Ok(Regenerate {
             product_urls: RepoSourceWrapper::new(mapping),
-            checkout_root: "resources".to_string()
+            checkout_root: "resources".to_string(),
         })
     }
 
     fn get_or_clone_repo(&self, product: &str) -> Result<Repository, git2::Error> {
         let repo_src = match self.product_urls.get_url(product) {
             Some(x) => x,
-            None => return Err(git2::Error::from_str("No url for associated product"))
+            None => return Err(git2::Error::from_str("No url for associated product")),
         };
         let mut on_disk = PathBuf::from(&self.checkout_root);
         on_disk.push(product);
@@ -73,7 +78,14 @@ impl Regenerate {
     fn checkout_branch(&self, repo: &Repository, name: &str) -> Result<(), git2::Error> {
         let tree = repo.revparse_single(name)?;
         repo.checkout_tree(&tree, None)?;
-        repo.set_head(&format!("refs/remotes/{}", name))?;
+        let head = match tree.kind() {
+            Some(k) => match k {
+                git2::ObjectType::Tag => format!("refs/tags/{}", name),
+                _ => format!("refs/remotes/{}", name),
+            },
+            None => panic!("No target for specified name"),
+        };
+        repo.set_head(&head)?;
         Ok(())
     }
 }
@@ -81,15 +93,22 @@ impl Regenerate {
 fn main() {
     let app = match Regenerate::new() {
         Ok(x) => x,
-        Err(msg) => {println!("{}", msg); return}
+        Err(msg) => {
+            println!("{}", msg);
+            return;
+        }
     };
-    let branch = "origin/u/nlust/tickets/DM-10785";
+    //let branch = "origin/u/nlust/tickets/DM-10785";
+    let branch = "w.2019.20";
     let repo = app.get_or_clone_repo("pipe_tasks");
     match repo {
-        Ok(repo) => {app.checkout_branch(&repo, branch)
-            .unwrap_or_else(|e| {panic!("issue chekcing out branch {}", e)});
-        },
-        Err(e) => {println!("{}", e);}
+        Ok(repo) => {
+            app.checkout_branch(&repo, branch)
+                .unwrap_or_else(|e| panic!("issue chekcing out branch {}", e));
+            println!("{}", repo.head().unwrap().target().unwrap());
+        }
+        Err(e) => {
+            println!("{}", e);
+        }
     };
-
 }
