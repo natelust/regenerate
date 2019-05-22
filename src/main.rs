@@ -1,3 +1,5 @@
+use crypto::digest::Digest;
+use crypto::sha1::Sha1;
 use git2::{Error, Repository};
 use reqwest;
 use reups::DBBuilderTrait;
@@ -96,12 +98,19 @@ impl<'a> Regenerate<'a> {
         Ok(())
     }
 
-    fn checkout_branch(&self, repo: &str) -> Result<(), git2::Error> {
+    fn checkout_branch(&self, repo_name: &str) -> Result<(), String> {
         let repo_rc = self.repo_map.borrow();
-        let repo = repo_rc.get(repo).unwrap();
+        let repo = repo_rc.get(repo_name).unwrap();
+        let mut success = false;
         for name in self.branches.iter() {
-            let tree = repo.revparse_single(name)?;
-            repo.checkout_tree(&tree, None)?;
+            let tree = match repo.revparse_single(name) {
+                Ok(x) => x,
+                Err(_) => continue,
+            };
+            match repo.checkout_tree(&tree, None) {
+                Ok(_) => (),
+                Err(_) => continue,
+            };
             let head = match tree.kind() {
                 Some(k) => match k {
                     git2::ObjectType::Tag => format!("refs/tags/{}", name),
@@ -109,20 +118,34 @@ impl<'a> Regenerate<'a> {
                 },
                 None => panic!("No target for specified name"),
             };
-            repo.set_head(&head)?;
+            match repo.set_head(&head) {
+                Ok(x) => x,
+                Err(e) => {
+                    return Err(format!(
+                        "Could not set {} to branch {} error {}",
+                        repo_name, name, e
+                    ))
+                }
+            }
+            success = true;
             break;
         }
-        Ok(())
+        match success {
+            true => Ok(()),
+            false => Err(format!("Could not find branch to checkout")),
+        }
     }
 
-    fn get_sha_of_head(repo: &Repository) -> Result<String, Error> {
+    fn get_sha_of_head(&self, name: &str) -> Result<String, Error> {
+        let repo_rc = self.repo_map.borrow();
+        let repo = repo_rc.get(name).unwrap();
+
         let head = repo.head()?;
         let target = head.target().unwrap();
         Ok(format!("{}", target))
     }
 
     fn graph_repo(&'a self, name: &str, node_type: reups::graph::NodeType) {
-        println!("Processing {}", name);
         if self.graph.borrow().is_none() {
             let _ = self
                 .graph
@@ -158,11 +181,7 @@ impl<'a> Regenerate<'a> {
                     let _ = self.checkout_branch(dep_name);
                     self.graph_repo(dep_name, node_type.clone())
                 }
-                let sha = {
-                    let other_repo_rc = self.repo_map.borrow();
-                    let other_repo = other_repo_rc.get(dep_name).unwrap();
-                    Regenerate::get_sha_of_head(other_repo).unwrap()
-                };
+                let sha = self.get_sha_of_head(dep_name).unwrap();
                 {
                     let mut graph_rc = self.graph.borrow_mut();
                     let graph = graph_rc.as_mut().unwrap();
@@ -175,14 +194,27 @@ impl<'a> Regenerate<'a> {
     fn print_graph(&self, product: &str) {
         let graph_rc = self.graph.borrow();
         let graph = graph_rc.as_ref().unwrap();
+        let mut hasher = Sha1::new();
         for node in graph.dfs_post_order(product) {
-            println!("dfs node: {}", graph.get_name(node));
+            let hashes = graph.product_versions(&graph.get_name(node));
+            let hash = match hashes.len() {
+                0 => {
+                    let name = graph.get_name(node);
+                    self.get_sha_of_head(&name).unwrap()
+                }
+                _ => hashes[0].clone(),
+            };
+            hasher.input(hash.as_bytes());
         }
+        let id = hasher.result_str();
+        println!("The id for {} is {}", product, id);
     }
 }
 
 fn main() {
-    let branch = "w.2019.20";
+    //let branch = "w.2019.20";
+    let branch = "origin/u/nlust/tickets/DM-10785";
+    let version = "test";
     let app = match Regenerate::new(Some(vec![branch.to_string()])) {
         Ok(x) => x,
         Err(msg) => {
@@ -190,7 +222,6 @@ fn main() {
             return;
         }
     };
-    //let branch = "origin/u/nlust/tickets/DM-10785";
     let repo_name = "pipe_tasks";
     let repo = app.get_or_clone_repo(repo_name);
     match repo {
