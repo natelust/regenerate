@@ -195,7 +195,7 @@ impl<'a> Regenerate<'a> {
         let graph_rc = self.graph.borrow();
         let graph = graph_rc.as_ref().unwrap();
         let mut hasher = Sha1::new();
-        for node in graph.dfs_post_order(product) {
+        for node in graph.dfs_post_order(product).unwrap() {
             let hashes = graph.product_versions(&graph.get_name(node));
             let hash = match hashes.len() {
                 0 => {

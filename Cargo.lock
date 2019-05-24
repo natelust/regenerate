@@ -1177,7 +1177,7 @@ dependencies = [
 [[package]]
 name = "reups"
 version = "0.3.0"
-source = "git+https://github.com/natelust/reups?branch=add_dfs#b75b163bbf765a2bf58231fd0ce893d3ac33c06b"
+source = "git+https://github.com/natelust/reups?branch=add_dfs#2627cf7ed3a7b73dde93c8802d9366215c7817e2"
 dependencies = [
  "clap 2.33.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "dirs 1.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
