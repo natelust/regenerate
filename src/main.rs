@@ -5,20 +5,48 @@ use reqwest;
 use reups::DBBuilderTrait;
 use reups_lib as reups;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::PathBuf;
 use yaml_rust;
 
 struct RepoSourceWrapper {
     remote_map: yaml_rust::yaml::Yaml,
+    local_map: yaml_rust::yaml::Yaml,
 }
 
 impl RepoSourceWrapper {
-    fn new(remote: yaml_rust::yaml::Yaml) -> RepoSourceWrapper {
-        RepoSourceWrapper { remote_map: remote }
+    fn new(remote: yaml_rust::yaml::Yaml, local: &Option<PathBuf>) -> RepoSourceWrapper {
+        let local_map = match local {
+            Some(file) => yaml_rust::YamlLoader::load_from_str(&fs::read_to_string(file).unwrap())
+                .unwrap()
+                .remove(0),
+            None => yaml_rust::yaml::Yaml::Hash(yaml_rust::yaml::Hash::new()),
+        };
+        RepoSourceWrapper {
+            remote_map: remote,
+            local_map,
+        }
     }
 
     fn get_url(&self, product: &str) -> Option<&str> {
+        if self
+            .local_map
+            .as_hash()
+            .unwrap()
+            .contains_key(&yaml_rust::Yaml::String(product.to_string()))
+        {
+            return match &self.local_map[product] {
+                yaml_rust::yaml::Yaml::String(s) => Some(&s),
+                yaml_rust::yaml::Yaml::Hash(hm) => Some(
+                    hm[&yaml_rust::yaml::Yaml::String("url".to_string())]
+                        .as_str()
+                        .unwrap(),
+                ),
+                yaml_rust::yaml::Yaml::BadValue => None,
+                _ => panic!("There should be no other types in remote product mapping"),
+            };
+        }
         match &self.remote_map[product] {
             yaml_rust::yaml::Yaml::String(s) => Some(&s),
             yaml_rust::yaml::Yaml::Hash(hm) => Some(
@@ -32,22 +60,27 @@ impl RepoSourceWrapper {
     }
 }
 
+struct RegenOptions {
+    branches: Option<Vec<String>>,
+    local_yaml: Option<PathBuf>,
+    clone_root: String,
+    install_root: String,
+    version: String,
+    build_tool: String,
+}
+
 struct Regenerate<'a> {
     product_urls: RepoSourceWrapper,
-    checkout_root: String,
     graph: RefCell<Option<reups::graph::Graph<'a>>>,
     db: reups::DB,
     repo_map: RefCell<HashMap<String, Repository>>,
     branches: Vec<String>,
+    options: RegenOptions,
+    build_completed: HashSet<String>,
 }
 
 impl<'a> Regenerate<'a> {
-    fn new(branches: Option<Vec<String>>) -> Result<Regenerate<'a>, String> {
-        let mut hash = HashMap::new();
-        hash.insert(
-            "pipe_tasks".to_string(),
-            "https://github.com/lsst/pipe_tasks.git".to_string(),
-        );
+    fn new(options: RegenOptions) -> Result<Regenerate<'a>, String> {
         // get the mapping from defined url
         let remote_map_url = "https://raw.githubusercontent.com/lsst/repos/master/etc/repos.yaml";
         let mut response = reqwest::get(remote_map_url).unwrap();
@@ -59,32 +92,29 @@ impl<'a> Regenerate<'a> {
         } else {
             return Err("There was a problem fetch or parsing the remote map".to_string());
         };
-        let db = reups::DBBuilder::new()
-            .add_eups_env(false)
-            .add_eups_user(false)
-            .build()
-            .unwrap();
+        let db = reups::DBBuilder::new().allow_empty(true).build().unwrap();
         let repo_map = HashMap::new();
         let mut br = vec!["master".to_string()];
-        if let Some(in_br) = branches {
+        if let Some(in_br) = options.branches.as_ref() {
             br = [&in_br[..], &br[..]].concat();
         }
         Ok(Regenerate {
-            product_urls: RepoSourceWrapper::new(mapping),
-            checkout_root: "resources".to_string(),
+            product_urls: RepoSourceWrapper::new(mapping, &options.local_yaml),
             db: db,
             graph: RefCell::new(None),
             repo_map: RefCell::new(repo_map),
             branches: br,
+            options: options,
+            build_completed: HashSet::new(),
         })
     }
 
-    fn get_or_clone_repo(&self, product: &str) -> Result<(), git2::Error> {
+    fn get_or_clone_repo(&self, product: &str) -> Result<(), String> {
         let repo_src = match self.product_urls.get_url(product) {
             Some(x) => x,
-            None => return Err(git2::Error::from_str("No url for associated product")),
+            None => return Err("No url for associated product".to_string()),
         };
-        let mut on_disk = PathBuf::from(&self.checkout_root);
+        let mut on_disk = PathBuf::from(&self.options.clone_root);
         on_disk.push(product);
         let repo = match if on_disk.exists() {
             Repository::open(on_disk)
@@ -136,11 +166,14 @@ impl<'a> Regenerate<'a> {
         }
     }
 
-    fn get_sha_of_head(&self, name: &str) -> Result<String, Error> {
+    fn get_sha_of_head(&self, name: &str) -> Result<String, String> {
         let repo_rc = self.repo_map.borrow();
         let repo = repo_rc.get(name).unwrap();
 
-        let head = repo.head()?;
+        let head = match repo.head() {
+            Ok(v) => v,
+            Err(e) => return Err(format!("{}", e)),
+        };
         let target = head.target().unwrap();
         Ok(format!("{}", target))
     }
@@ -191,11 +224,11 @@ impl<'a> Regenerate<'a> {
         }
     }
 
-    fn print_graph(&self, product: &str) {
+    fn make_product_id(&self, product: &str) -> Result<String, String> {
         let graph_rc = self.graph.borrow();
         let graph = graph_rc.as_ref().unwrap();
         let mut hasher = Sha1::new();
-        for node in graph.dfs_post_order(product).unwrap() {
+        for node in graph.dfs_post_order(product)? {
             let hashes = graph.product_versions(&graph.get_name(node));
             let hash = match hashes.len() {
                 0 => {
@@ -207,15 +240,84 @@ impl<'a> Regenerate<'a> {
             hasher.input(hash.as_bytes());
         }
         let id = hasher.result_str();
-        println!("The id for {} is {}", product, id);
+        Ok(id)
+    }
+
+    fn install_product(&'a self, product: &str) -> Result<(), String> {
+        // clone product
+        // checkout branch
+        // graph repo (VERIFY BRANCH IS PRESENT IN AT LEAST ONE RPO)
+        // make product id
+        // verify product id is not in database, if so short circuit and declare
+        // loop through graph dfs and build
+        // create directory to install in
+        // change to repo working dir
+        // issue eupspkg build comamnds
+        // declare to systemdb
+        // declare to remote db?
+
+        self.get_or_clone_repo(product)?;
+        self.checkout_branch(product)?;
+        self.graph_repo(product, reups::graph::NodeType::Required);
+        self.install_product_impl(product)
+    }
+
+    fn install_product_impl(&self, product: &str) -> Result<(), String> {
+        // short circuit if this has already been built
+        if self.build_completed.contains(product) {
+            return Ok(());
+        }
+        let product_id = self.make_product_id(product)?;
+        let product_dir = if !self.db.has_identity(product, &product_id) {
+            PathBuf::from(
+                self.db
+                    .get_table_from_identity(product, &product_id)
+                    .ok_or(format!(
+                        "Error retrieving up table for {} in database",
+                        product
+                    ))?
+                    .product_dir,
+            )
+        } else {
+            // loop through all dependencies
+            let graph_rc = self.graph.borrow();
+            let graph = graph_rc.as_ref().unwrap();
+            for node in graph.dfs_post_order(product)? {
+                let name = &graph.get_name(node);
+                // this product will be in the dfs graph, so skip it and finish
+                // this function
+                if name != product {
+                    self.install_product_impl(name)?;
+                }
+            }
+            let mut product_dir = PathBuf::from(&self.options.install_root);
+            product_dir.push(product);
+            product_dir.push(&self.options.version);
+            match std::fs::create_dir_all(&product_dir) {
+                Ok(_) => (),
+                Err(e) => return Err(format!("{}", e)),
+            }
+            // issue the build command
+            //
+            product_dir
+        };
+        Ok(())
     }
 }
 
 fn main() {
-    //let branch = "w.2019.20";
-    let branch = "origin/u/nlust/tickets/DM-10785";
-    let version = "test";
-    let app = match Regenerate::new(Some(vec![branch.to_string()])) {
+    let branch = "w.2019.20";
+    //let branch = "origin/u/nlust/tickets/DM-10785";
+    let _version = "test";
+    let options = RegenOptions {
+        branches: Some(vec![branch.to_string()]),
+        local_yaml: Some(PathBuf::from("resources/local_repo_list.yaml")),
+        clone_root: "resources/clones/".to_string(),
+        install_root: "resources/install/".to_string(),
+        version: "version".to_string(),
+        build_tool: "eupspkg.sh".to_string(),
+    };
+    let app = match Regenerate::new(options) {
         Ok(x) => x,
         Err(msg) => {
             println!("{}", msg);
@@ -224,13 +326,14 @@ fn main() {
     };
     let repo_name = "pipe_tasks";
     let repo = app.get_or_clone_repo(repo_name);
+    println!("{:?}", repo);
     match repo {
         Ok(_) => {
             app.checkout_branch(repo_name)
                 .unwrap_or_else(|e| panic!("issue chekcing out branch {}", e));
             //println!("{}", repo.head().unwrap().target().unwrap());
             app.graph_repo(repo_name, reups::graph::NodeType::Required);
-            app.print_graph(repo_name);
+            app.make_product_id(repo_name);
         }
         Err(e) => {
             println!("{}", e);
