@@ -8,5 +8,7 @@ edition = "2018"
 git2 = "^0.8"
 reqwest = "^0.9"
 yaml-rust = "^0.4"
-reups = { git = "https://github.com/natelust/reups"}
+reups = { path = "/home/nate/rust_workspace/reups/" }
 rust-crypto = "^0.2"
+fnv = "^1.0"
+fs_extra = "^1.1"
