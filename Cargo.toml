@@ -12,3 +12,5 @@ reups = { path = "/home/nate/rust_workspace/reups/" }
 rust-crypto = "^0.2"
 fnv = "^1.0"
 fs_extra = "^1.1"
+log = { version = "^0.4", features = ["std", "serde"] }
+tempdir = "^0.3"
